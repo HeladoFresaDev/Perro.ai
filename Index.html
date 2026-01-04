@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Loona IA - GitHub Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <style>
+        body {
+            background-color: #000;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            color: white;
+            font-family: system-ui, -apple-system, sans-serif;
+            overflow: hidden;
+        }
+        .robot-eye {
+            width: 80px;
+            height: 80px;
+            background: #00fbff;
+            border-radius: 50%;
+            box-shadow: 0 0 30px #00fbff;
+            transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        .blink { height: 4px; margin: 38px 0; }
+        .happy { border-radius: 20% 20% 100% 100%; border-bottom: 12px solid white; }
+        .camera-bg {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            object-fit: cover; opacity: 0.15; z-index: -1;
+        }
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(15px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 24px;
+            padding: 24px;
+            width: 90%;
+            max-width: 380px;
+        }
+    </style>
+</head>
+<body>
+
+    <video id="video" class="camera-bg" autoplay playsinline muted></video>
+
+    <div class="flex gap-8 mb-8" id="eyes">
+        <div id="eye-l" class="robot-eye"></div>
+        <div id="eye-r" class="robot-eye"></div>
+    </div>
+
+    <div class="glass-panel text-center">
+        <h1 class="text-xl font-black mb-1 tracking-widest text-cyan-400">LOONA AI</h1>
+        <div id="info" class="text-[10px] font-mono text-gray-400 mb-6 h-4 uppercase">Cargando cerebro...</div>
+        
+        <button id="btnConnect" class="w-full bg-cyan-600 hover:bg-cyan-500 py-4 rounded-2xl font-black text-sm transition-all shadow-lg shadow-cyan-900/20 active:scale-95">
+            CONECTAR MOVE HUB
+        </button>
+
+        <div id="status-ui" class="mt-6 hidden animate-fade-in text-left">
+            <div class="flex items-center justify-between border-b border-white/5 pb-2 mb-3">
+                <span class="text-[9px] text-gray-500 font-bold uppercase">Estado de IA:</span>
+                <span id="ai-mode" class="text-[9px] font-bold text-yellow-400 uppercase tracking-widest">Inactiva</span>
+            </div>
+            <div class="space-y-2">
+                <button onclick="sendMove(40, 40, 500)" class="w-full bg-white/5 hover:bg-white/10 p-2 rounded-lg text-[10px] uppercase font-bold">Test Motores</button>
+                <button onclick="location.reload()" class="w-full border border-red-900/30 text-red-500 p-2 rounded-lg text-[9px] uppercase font-bold">Reiniciar Sistema</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const info = document.getElementById('info');
+        const btn = document.getElementById('btnConnect');
+        const aiMode = document.getElementById('ai-mode');
+        
+        let model;
+        let char = null;
+        let hubActive = false;
+        let isMoving = false;
+        let scanTimer = 0;
+
+        function updateFace(type) {
+            const eyes = [document.getElementById('eye-l'), document.getElementById('eye-r')];
+            eyes.forEach(e => {
+                e.className = 'robot-eye';
+                if(type === 'blink') e.classList.add('blink');
+                if(type === 'happy') e.classList.add('happy');
+            });
+        }
+
+        setInterval(() => {
+            if(!document.getElementById('eye-l').classList.contains('happy')) {
+                updateFace('blink');
+                setTimeout(() => updateFace('normal'), 200);
+            }
+        }, 5000);
+
+        async function initCamera() {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+            video.srcObject = stream;
+        }
+
+        async function loonaLogic() {
+            if (!model) return;
+            const preds = await model.detect(video);
+            
+            let foundPerson = false;
+            if (preds.length > 0) {
+                const p = preds.find(x => x.class === 'person' && x.score > 0.45);
+                if(p) {
+                    foundPerson = true;
+                    aiMode.innerText = "Interacción";
+                    info.innerText = "Objetivo detectado";
+                    updateFace('happy');
+                    if(!isMoving) {
+                        await sendMove(30, -30, 400); // Pequeño giro de saludo
+                    }
+                } else {
+                    info.innerText = "Viendo: " + preds[0].class;
+                }
+            }
+
+            // Modo exploración si no hay nadie
+            if(!foundPerson && hubActive && !isMoving) {
+                const now = Date.now();
+                if(now - scanTimer > 6000) {
+                    scanTimer = now;
+                    aiMode.innerText = "Exploración";
+                    await sendMove(25, -25, 300); // Escanear área
+                }
+            }
+            
+            requestAnimationFrame(loonaLogic);
+        }
+
+        async function sendMove(l, r, ms = 0) {
+            if (!char) return;
+            isMoving = true;
+            try {
+                // Comando LWP v3
+                await char.writeValueWithoutResponse(new Uint8Array([0x09, 0x00, 0x81, 0x10, 0x11, 0x02, l, r, 0x64]));
+                if(ms > 0) {
+                    setTimeout(async () => {
+                        await char.writeValueWithoutResponse(new Uint8Array([0x09, 0x00, 0x81, 0x10, 0x11, 0x02, 0x00, 0x00, 0x64]));
+                        isMoving = false;
+                    }, ms);
+                } else {
+                    isMoving = (l !== 0 || r !== 0);
+                }
+            } catch (e) { isMoving = false; }
+        }
+
+        btn.onclick = async () => {
+            try {
+                info.innerText = "Buscando Hub...";
+                const device = await navigator.bluetooth.requestDevice({
+                    filters: [{ services: ['00001623-1212-efde-1623-785feabcd123'] }]
+                });
+                const server = await device.gatt.connect();
+                const service = await server.getPrimaryService('00001623-1212-efde-1623-785feabcd123');
+                char = await service.getCharacteristic('00001624-1212-efde-1623-785feabcd123');
+                
+                // Init Hub
+                await char.writeValueWithoutResponse(new Uint8Array([0x05, 0x00, 0x01, 0x02, 0x02]));
+                await char.writeValueWithoutResponse(new Uint8Array([0x08, 0x00, 0x81, 0x32, 0x11, 0x51, 0x00, 0x06]));
+
+                hubActive = true;
+                btn.innerText = "CONECTADO";
+                btn.className = "w-full bg-green-600 py-4 rounded-2xl font-black text-sm";
+                document.getElementById('status-ui').classList.remove('hidden');
+                
+                setInterval(async () => {
+                    try { await char.writeValueWithoutResponse(new Uint8Array([0x03, 0x00, 0x01])); } catch(e) {}
+                }, 2000);
+
+                device.addEventListener('gattserverdisconnected', () => location.reload());
+            } catch (err) { info.innerText = "Error conexión"; }
+        };
+
+        window.onload = async () => {
+            model = await cocoSsd.load();
+            await initCamera();
+            info.innerText = "Sistema listo";
+            loonaLogic();
+        };
+    </script>
+</body>
+</html>
