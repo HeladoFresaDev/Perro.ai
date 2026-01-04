@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Loona IA - GitHub Edition</title>
+    <title>Loona IA - Fix Desconexión</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
@@ -62,7 +62,7 @@
 
     <div class="glass-panel text-center">
         <h1 class="text-xl font-black mb-1 tracking-widest text-cyan-400">LOONA AI</h1>
-        <div id="info" class="text-[10px] font-mono text-gray-400 mb-6 h-4 uppercase">Cargando cerebro...</div>
+        <div id="info" class="text-[10px] font-mono text-gray-400 mb-6 h-4 uppercase">Cargando sistema...</div>
         
         <button id="btnConnect" class="w-full bg-cyan-600 hover:bg-cyan-500 py-4 rounded-2xl font-black text-sm transition-all shadow-lg shadow-cyan-900/20 active:scale-95">
             CONECTAR MOVE HUB
@@ -91,6 +91,7 @@
         let hubActive = false;
         let isMoving = false;
         let scanTimer = 0;
+        let keepAliveInterval = null;
 
         function updateFace(type) {
             const eyes = [document.getElementById('eye-l'), document.getElementById('eye-r')];
@@ -124,7 +125,6 @@
             
             let foundTarget = false;
             if (preds.length > 0) {
-                // Buscamos 'person' (piernas/pies) con un umbral más bajo
                 const p = preds.find(x => x.class === 'person' && x.score > 0.40);
                 if(p) {
                     foundTarget = true;
@@ -132,7 +132,6 @@
                     info.innerText = "Humano detectado";
                     updateFace('happy');
                     if(!isMoving) {
-                        // Avanza hacia la persona (piernas)
                         await sendMove(35, 35, 500);
                     }
                 } else {
@@ -140,14 +139,12 @@
                 }
             }
 
-            // Modo exploración/barrido si no hay nadie cerca
             if(!foundTarget && hubActive && !isMoving) {
                 const now = Date.now();
                 if(now - scanTimer > 5000) {
                     scanTimer = now;
                     aiMode.innerText = "Buscando...";
                     updateFace('searching');
-                    // Pequeño barrido lateral para encontrar piernas
                     await sendMove(25, -25, 300); 
                 }
             }
@@ -159,21 +156,24 @@
             if (!char) return;
             isMoving = true;
             try {
-                // Comando de movimiento para Move Hub (LWP v3)
-                // l, r son velocidades de -100 a 100
                 const data = new Uint8Array([0x09, 0x00, 0x81, 0x10, 0x11, 0x02, l, r, 0x64]);
                 await char.writeValueWithoutResponse(data);
                 
                 if(ms > 0) {
                     setTimeout(async () => {
-                        await char.writeValueWithoutResponse(new Uint8Array([0x09, 0x00, 0x81, 0x10, 0x11, 0x02, 0x00, 0x00, 0x64]));
+                        try {
+                            await char.writeValueWithoutResponse(new Uint8Array([0x09, 0x00, 0x81, 0x10, 0x11, 0x02, 0x00, 0x00, 0x64]));
+                        } catch(e){}
                         isMoving = false;
                         updateFace('normal');
                     }, ms);
                 } else {
                     isMoving = (l !== 0 || r !== 0);
                 }
-            } catch (e) { isMoving = false; }
+            } catch (e) { 
+                console.error("Error envío comando:", e);
+                isMoving = false; 
+            }
         }
 
         btn.onclick = async () => {
@@ -182,29 +182,45 @@
                 const device = await navigator.bluetooth.requestDevice({
                     filters: [{ services: ['00001623-1212-efde-1623-785feabcd123'] }]
                 });
+                
                 const server = await device.gatt.connect();
                 const service = await server.getPrimaryService('00001623-1212-efde-1623-785feabcd123');
-                char = await service.getCharacteristic('00001624-1212-efde-1624-785feabcd123'); // Corregido ID característica
                 
-                // Inicializar Hub y poner luz en verde
+                // Intentamos obtener la característica principal (00001624...)
+                char = await service.getCharacteristic('00001624-1212-efde-1623-785feabcd123');
+                
+                // Comando de activación (Handshake)
                 await char.writeValueWithoutResponse(new Uint8Array([0x05, 0x00, 0x01, 0x02, 0x02]));
+                
+                // Poner luz del Hub en Cyan/Verde para confirmar conexión estable
                 await char.writeValueWithoutResponse(new Uint8Array([0x08, 0x00, 0x81, 0x32, 0x11, 0x51, 0x00, 0x06]));
 
                 hubActive = true;
-                btn.innerText = "CONECTADO";
+                btn.innerText = "CONECTADO ✅";
                 btn.className = "w-full bg-green-600 py-4 rounded-2xl font-black text-sm";
                 document.getElementById('status-ui').classList.remove('hidden');
+                info.innerText = "Conexión estable";
                 
-                // Keep-alive para que no se apague el hub
-                setInterval(async () => {
+                // REGLA DE ORO: Enviar comando vacío cada 1.5s para evitar auto-apagado
+                if(keepAliveInterval) clearInterval(keepAliveInterval);
+                keepAliveInterval = setInterval(async () => {
                     if(char) {
-                        try { await char.writeValueWithoutResponse(new Uint8Array([0x03, 0x00, 0x01])); } catch(e) {}
+                        try { 
+                            // Comando corto de "get hub property" actúa como ping
+                            await char.writeValueWithoutResponse(new Uint8Array([0x03, 0x00, 0x01])); 
+                        } catch(e) {
+                            console.log("Reconectando Keep-alive...");
+                        }
                     }
-                }, 2000);
+                }, 1500);
 
-                device.addEventListener('gattserverdisconnected', () => location.reload());
+                device.addEventListener('gattserverdisconnected', () => {
+                    hubActive = false;
+                    location.reload();
+                });
+
             } catch (err) { 
-                info.innerText = "Error Bluetooth";
+                info.innerText = "Error: " + err.message;
                 console.error(err);
             }
         };
