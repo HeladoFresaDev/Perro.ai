@@ -30,6 +30,11 @@
         }
         .blink { height: 4px; margin: 38px 0; }
         .happy { border-radius: 20% 20% 100% 100%; border-bottom: 12px solid white; }
+        .searching { animation: scan 2s infinite; }
+        @keyframes scan {
+            0%, 100% { transform: translateX(-10px); }
+            50% { transform: translateX(10px); }
+        }
         .camera-bg {
             position: fixed;
             top: 0; left: 0; width: 100%; height: 100%;
@@ -93,6 +98,7 @@
                 e.className = 'robot-eye';
                 if(type === 'blink') e.classList.add('blink');
                 if(type === 'happy') e.classList.add('happy');
+                if(type === 'searching') e.classList.add('searching');
             });
         }
 
@@ -104,37 +110,45 @@
         }, 5000);
 
         async function initCamera() {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-            video.srcObject = stream;
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                video.srcObject = stream;
+            } catch (e) {
+                info.innerText = "Error de cámara";
+            }
         }
 
         async function loonaLogic() {
             if (!model) return;
             const preds = await model.detect(video);
             
-            let foundPerson = false;
+            let foundTarget = false;
             if (preds.length > 0) {
-                const p = preds.find(x => x.class === 'person' && x.score > 0.45);
+                // Buscamos 'person' (piernas/pies) con un umbral más bajo
+                const p = preds.find(x => x.class === 'person' && x.score > 0.40);
                 if(p) {
-                    foundPerson = true;
+                    foundTarget = true;
                     aiMode.innerText = "Interacción";
-                    info.innerText = "Objetivo detectado";
+                    info.innerText = "Humano detectado";
                     updateFace('happy');
                     if(!isMoving) {
-                        await sendMove(30, -30, 400); // Pequeño giro de saludo
+                        // Avanza hacia la persona (piernas)
+                        await sendMove(35, 35, 500);
                     }
                 } else {
                     info.innerText = "Viendo: " + preds[0].class;
                 }
             }
 
-            // Modo exploración si no hay nadie
-            if(!foundPerson && hubActive && !isMoving) {
+            // Modo exploración/barrido si no hay nadie cerca
+            if(!foundTarget && hubActive && !isMoving) {
                 const now = Date.now();
-                if(now - scanTimer > 6000) {
+                if(now - scanTimer > 5000) {
                     scanTimer = now;
-                    aiMode.innerText = "Exploración";
-                    await sendMove(25, -25, 300); // Escanear área
+                    aiMode.innerText = "Buscando...";
+                    updateFace('searching');
+                    // Pequeño barrido lateral para encontrar piernas
+                    await sendMove(25, -25, 300); 
                 }
             }
             
@@ -145,12 +159,16 @@
             if (!char) return;
             isMoving = true;
             try {
-                // Comando LWP v3
-                await char.writeValueWithoutResponse(new Uint8Array([0x09, 0x00, 0x81, 0x10, 0x11, 0x02, l, r, 0x64]));
+                // Comando de movimiento para Move Hub (LWP v3)
+                // l, r son velocidades de -100 a 100
+                const data = new Uint8Array([0x09, 0x00, 0x81, 0x10, 0x11, 0x02, l, r, 0x64]);
+                await char.writeValueWithoutResponse(data);
+                
                 if(ms > 0) {
                     setTimeout(async () => {
                         await char.writeValueWithoutResponse(new Uint8Array([0x09, 0x00, 0x81, 0x10, 0x11, 0x02, 0x00, 0x00, 0x64]));
                         isMoving = false;
+                        updateFace('normal');
                     }, ms);
                 } else {
                     isMoving = (l !== 0 || r !== 0);
@@ -160,15 +178,15 @@
 
         btn.onclick = async () => {
             try {
-                info.innerText = "Buscando Hub...";
+                info.innerText = "Buscando Robot...";
                 const device = await navigator.bluetooth.requestDevice({
                     filters: [{ services: ['00001623-1212-efde-1623-785feabcd123'] }]
                 });
                 const server = await device.gatt.connect();
                 const service = await server.getPrimaryService('00001623-1212-efde-1623-785feabcd123');
-                char = await service.getCharacteristic('00001624-1212-efde-1623-785feabcd123');
+                char = await service.getCharacteristic('00001624-1212-efde-1624-785feabcd123'); // Corregido ID característica
                 
-                // Init Hub
+                // Inicializar Hub y poner luz en verde
                 await char.writeValueWithoutResponse(new Uint8Array([0x05, 0x00, 0x01, 0x02, 0x02]));
                 await char.writeValueWithoutResponse(new Uint8Array([0x08, 0x00, 0x81, 0x32, 0x11, 0x51, 0x00, 0x06]));
 
@@ -177,15 +195,22 @@
                 btn.className = "w-full bg-green-600 py-4 rounded-2xl font-black text-sm";
                 document.getElementById('status-ui').classList.remove('hidden');
                 
+                // Keep-alive para que no se apague el hub
                 setInterval(async () => {
-                    try { await char.writeValueWithoutResponse(new Uint8Array([0x03, 0x00, 0x01])); } catch(e) {}
+                    if(char) {
+                        try { await char.writeValueWithoutResponse(new Uint8Array([0x03, 0x00, 0x01])); } catch(e) {}
+                    }
                 }, 2000);
 
                 device.addEventListener('gattserverdisconnected', () => location.reload());
-            } catch (err) { info.innerText = "Error conexión"; }
+            } catch (err) { 
+                info.innerText = "Error Bluetooth";
+                console.error(err);
+            }
         };
 
         window.onload = async () => {
+            info.innerText = "Cargando IA...";
             model = await cocoSsd.load();
             await initCamera();
             info.innerText = "Sistema listo";
